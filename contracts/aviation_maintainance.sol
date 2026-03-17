@@ -1,210 +1,212 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-contract AviationMaintenance {
-    uint256 public constant A_CHECK_HOURS = 600;
-
+contract JetTechnicalPassport {
     address public admin;
-    address public structureInspector;
-    address public fuelEngineer;
-    address public diagnosticsEngineer;
 
-    enum Status {
-        Airworthy,
-        ACheckRequired
+    constructor() {
+        admin = msg.sender;
+    }
+
+    enum RecordType {
+        Maintenance,
+        Repair,
+        Inspection,
+        ComponentReplacement,
+        Other
     }
 
     struct Aircraft {
         bool exists;
-        bool isFlying;
-        uint256 flightHours;
-        uint256 cycle;
-        Status status;
-        bool structureSigned;
-        bool fuelSigned;
-        bool diagnosticsSigned;
+        string tailNumber;
+        address owner;
+    }
+
+    struct Record {
+        uint256 id;
+        bytes32 aircraftId;
+        address serviceCenter;
+        RecordType recordType;
+        string encryptedDataUri;
+        bytes32 documentHash;
+        uint256 timestamp;
     }
 
     mapping(bytes32 => Aircraft) public aircrafts;
+    mapping(address => bool) public approvedServiceCenters;
+    mapping(address => bool) public approvedBrokers;
 
-    event AircraftRegistered(bytes32 indexed aircraftId);
-    event FlightStarted(bytes32 indexed aircraftId);
-    event FlightEnded(bytes32 indexed aircraftId, uint256 hoursFlown, uint256 totalHours);
-    event ACheckTriggered(bytes32 indexed aircraftId, uint256 totalHours);
-    event StructureSigned(bytes32 indexed aircraftId);
-    event FuelSigned(bytes32 indexed aircraftId);
-    event DiagnosticsSigned(bytes32 indexed aircraftId);
-    event ReturnApproved(bytes32 indexed aircraftId, uint256 newCycle);
+    mapping(bytes32 => Record[]) private aircraftRecords;
+    mapping(bytes32 => mapping(address => bool)) public brokerAccess;
+
+    event AircraftRegistered(bytes32 indexed aircraftId, string tailNumber, address indexed owner);
+    event OwnershipTransferred(bytes32 indexed aircraftId, address indexed oldOwner, address indexed newOwner);
+
+    event ServiceCenterApproved(address indexed serviceCenter);
+    event ServiceCenterRevoked(address indexed serviceCenter);
+
+    event BrokerApproved(address indexed broker);
+    event BrokerRevoked(address indexed broker);
+
+    event RecordAdded(
+        bytes32 indexed aircraftId,
+        uint256 indexed recordId,
+        address indexed serviceCenter,
+        RecordType recordType,
+        bytes32 documentHash
+    );
+
+    event BrokerAccessGranted(bytes32 indexed aircraftId, address indexed broker);
+    event BrokerAccessRevoked(bytes32 indexed aircraftId, address indexed broker);
 
     modifier onlyAdmin() {
         require(msg.sender == admin, "Only admin");
         _;
     }
 
-    modifier onlyStructureInspector() {
-        require(msg.sender == structureInspector, "Only structure inspector");
-        _;
-    }
-
-    modifier onlyFuelEngineer() {
-        require(msg.sender == fuelEngineer, "Only fuel engineer");
-        _;
-    }
-
-    modifier onlyDiagnosticsEngineer() {
-        require(msg.sender == diagnosticsEngineer, "Only diagnostics engineer");
-        _;
-    }
-
-    modifier aircraftExists(bytes32 aircraftId) {
+    modifier onlyAircraftOwner(bytes32 aircraftId) {
         require(aircrafts[aircraftId].exists, "Aircraft not found");
+        require(aircrafts[aircraftId].owner == msg.sender, "Only aircraft owner");
         _;
     }
 
-    constructor(
-        address _structureInspector,
-        address _fuelEngineer,
-        address _diagnosticsEngineer
-    ) {
-        admin = msg.sender;
-        structureInspector = _structureInspector;
-        fuelEngineer = _fuelEngineer;
-        diagnosticsEngineer = _diagnosticsEngineer;
+    modifier onlyApprovedServiceCenter() {
+        require(approvedServiceCenters[msg.sender], "Not approved service center");
+        _;
     }
 
-    function registerAircraft(bytes32 aircraftId) external onlyAdmin {
+    modifier onlyApprovedBroker() {
+        require(approvedBrokers[msg.sender], "Not approved broker");
+        _;
+    }
+
+    function approveServiceCenter(address serviceCenter) external onlyAdmin {
+        approvedServiceCenters[serviceCenter] = true;
+        emit ServiceCenterApproved(serviceCenter);
+    }
+
+    function revokeServiceCenter(address serviceCenter) external onlyAdmin {
+        approvedServiceCenters[serviceCenter] = false;
+        emit ServiceCenterRevoked(serviceCenter);
+    }
+
+    function approveBroker(address broker) external onlyAdmin {
+        approvedBrokers[broker] = true;
+        emit BrokerApproved(broker);
+    }
+
+    function revokeBroker(address broker) external onlyAdmin {
+        approvedBrokers[broker] = false;
+        emit BrokerRevoked(broker);
+    }
+
+    function registerAircraft(bytes32 aircraftId, string calldata tailNumber, address owner) external onlyAdmin {
         require(!aircrafts[aircraftId].exists, "Aircraft already exists");
 
         aircrafts[aircraftId] = Aircraft({
             exists: true,
-            isFlying: false,
-            flightHours: 0,
-            cycle: 0,
-            status: Status.Airworthy,
-            structureSigned: false,
-            fuelSigned: false,
-            diagnosticsSigned: false
+            tailNumber: tailNumber,
+            owner: owner
         });
 
-        emit AircraftRegistered(aircraftId);
+        emit AircraftRegistered(aircraftId, tailNumber, owner);
     }
 
-    function startFlight(bytes32 aircraftId) external aircraftExists(aircraftId) {
-        Aircraft storage a = aircrafts[aircraftId];
+    function transferOwnership(bytes32 aircraftId, address newOwner) external onlyAircraftOwner(aircraftId) {
+        require(newOwner != address(0), "Invalid new owner");
 
-        require(a.status == Status.Airworthy, "Aircraft requires A-check");
-        require(!a.isFlying, "Flight already started");
+        address oldOwner = aircrafts[aircraftId].owner;
+        aircrafts[aircraftId].owner = newOwner;
 
-        a.isFlying = true;
-        emit FlightStarted(aircraftId);
+        emit OwnershipTransferred(aircraftId, oldOwner, newOwner);
     }
 
-    function endFlight(bytes32 aircraftId, uint256 hoursFlown) external aircraftExists(aircraftId) {
-        Aircraft storage a = aircrafts[aircraftId];
+    function addRecord(
+        bytes32 aircraftId,
+        RecordType recordType,
+        string calldata encryptedDataUri,
+        bytes32 documentHash
+    ) external onlyApprovedServiceCenter {
+        require(aircrafts[aircraftId].exists, "Aircraft not found");
+        require(bytes(encryptedDataUri).length > 0, "Empty data URI");
+        require(documentHash != bytes32(0), "Empty document hash");
 
-        require(a.isFlying, "Flight not started");
-        require(hoursFlown > 0, "Hours must be > 0");
+        uint256 recordId = aircraftRecords[aircraftId].length;
 
-        a.isFlying = false;
-        a.flightHours += hoursFlown;
+        aircraftRecords[aircraftId].push(
+            Record({
+                id: recordId,
+                aircraftId: aircraftId,
+                serviceCenter: msg.sender,
+                recordType: recordType,
+                encryptedDataUri: encryptedDataUri,
+                documentHash: documentHash,
+                timestamp: block.timestamp
+            })
+        );
 
-        emit FlightEnded(aircraftId, hoursFlown, a.flightHours);
-
-        if (a.flightHours >= A_CHECK_HOURS) {
-            a.status = Status.ACheckRequired;
-            emit ACheckTriggered(aircraftId, a.flightHours);
-        }
+        emit RecordAdded(aircraftId, recordId, msg.sender, recordType, documentHash);
     }
 
-    function signStructureCheck(bytes32 aircraftId)
+    function grantBrokerAccess(bytes32 aircraftId, address broker)
         external
-        aircraftExists(aircraftId)
-        onlyStructureInspector
+        onlyAircraftOwner(aircraftId)
     {
-        Aircraft storage a = aircrafts[aircraftId];
-        require(a.status == Status.ACheckRequired, "A-check not required");
-        require(!a.structureSigned, "Already signed");
+        require(approvedBrokers[broker], "Broker not approved");
 
-        a.structureSigned = true;
-        emit StructureSigned(aircraftId);
+        brokerAccess[aircraftId][broker] = true;
+        emit BrokerAccessGranted(aircraftId, broker);
     }
 
-    function signFuelCheck(bytes32 aircraftId)
+    function revokeBrokerAccess(bytes32 aircraftId, address broker)
         external
-        aircraftExists(aircraftId)
-        onlyFuelEngineer
+        onlyAircraftOwner(aircraftId)
     {
-        Aircraft storage a = aircrafts[aircraftId];
-        require(a.status == Status.ACheckRequired, "A-check not required");
-        require(!a.fuelSigned, "Already signed");
-
-        a.fuelSigned = true;
-        emit FuelSigned(aircraftId);
-    }
-
-    function signDiagnosticsCheck(bytes32 aircraftId)
-        external
-        aircraftExists(aircraftId)
-        onlyDiagnosticsEngineer
-    {
-        Aircraft storage a = aircrafts[aircraftId];
-        require(a.status == Status.ACheckRequired, "A-check not required");
-        require(!a.diagnosticsSigned, "Already signed");
-
-        a.diagnosticsSigned = true;
-        emit DiagnosticsSigned(aircraftId);
-    }
-
-    function approveReturnToService(bytes32 aircraftId)
-        external
-        aircraftExists(aircraftId)
-        onlyAdmin
-    {
-        Aircraft storage a = aircrafts[aircraftId];
-
-        require(a.status == Status.ACheckRequired, "A-check not required");
-        require(a.structureSigned, "Structure sign missing");
-        require(a.fuelSigned, "Fuel sign missing");
-        require(a.diagnosticsSigned, "Diagnostics sign missing");
-
-        a.flightHours = 0;
-        a.cycle += 1;
-        a.status = Status.Airworthy;
-        a.structureSigned = false;
-        a.fuelSigned = false;
-        a.diagnosticsSigned = false;
-
-        emit ReturnApproved(aircraftId, a.cycle);
-    }
-
-    function canFly(bytes32 aircraftId) external view aircraftExists(aircraftId) returns (bool) {
-        Aircraft storage a = aircrafts[aircraftId];
-        return a.status == Status.Airworthy && !a.isFlying;
+        brokerAccess[aircraftId][broker] = false;
+        emit BrokerAccessRevoked(aircraftId, broker);
     }
 
     function getAircraft(bytes32 aircraftId)
         external
         view
-        aircraftExists(aircraftId)
+        returns (string memory tailNumber, address owner)
+    {
+        require(aircrafts[aircraftId].exists, "Aircraft not found");
+        Aircraft storage a = aircrafts[aircraftId];
+        return (a.tailNumber, a.owner);
+    }
+
+    function getRecordCount(bytes32 aircraftId) external view returns (uint256) {
+        require(aircrafts[aircraftId].exists, "Aircraft not found");
+        return aircraftRecords[aircraftId].length;
+    }
+
+    function getRecord(bytes32 aircraftId, uint256 index)
+        external
+        view
+        onlyApprovedBroker
         returns (
-            bool isFlying,
-            uint256 flightHours,
-            uint256 cycle,
-            Status status,
-            bool structureSigned,
-            bool fuelSigned,
-            bool diagnosticsSigned
+            uint256 id,
+            address serviceCenter,
+            RecordType recordType,
+            string memory encryptedDataUri,
+            bytes32 documentHash,
+            uint256 timestamp
         )
     {
-        Aircraft storage a = aircrafts[aircraftId];
+        require(aircrafts[aircraftId].exists, "Aircraft not found");
+        require(brokerAccess[aircraftId][msg.sender], "Broker has no access");
+        require(index < aircraftRecords[aircraftId].length, "Record not found");
+
+        Record storage r = aircraftRecords[aircraftId][index];
+
         return (
-            a.isFlying,
-            a.flightHours,
-            a.cycle,
-            a.status,
-            a.structureSigned,
-            a.fuelSigned,
-            a.diagnosticsSigned
+            r.id,
+            r.serviceCenter,
+            r.recordType,
+            r.encryptedDataUri,
+            r.documentHash,
+            r.timestamp
         );
     }
 }
